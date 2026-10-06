@@ -1,0 +1,533 @@
+.dashboard {
+  min-height: 100vh;
+  box-sizing: border-box;
+  background: #0f172a;
+  color: #f8fafc;
+  padding: 40px 60px;
+  font-family: Inter, Arial, sans-serif;
+}
+
+/* ==============================
+   Header
+============================== */
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1200px;
+  margin: 0 auto 30px;
+}
+
+.dashboard-title h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 700;
+}
+
+.dashboard-title p {
+  margin: 8px 0 0;
+  color: #94a3b8;
+  font-size: 15px;
+}
+
+/* ==============================
+   Logout Button
+============================== */
+
+.logout-button {
+  padding: 10px 20px;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  background: transparent;
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.logout-button:hover {
+  background: #334155;
+  border-color: #64748b;
+}
+
+/* ==============================
+   User Card
+============================== */
+
+.user-card {
+  max-width: 1152px;
+  margin: 0 auto 25px;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  box-sizing: border-box;
+}
+
+/* User Avatar */
+
+.user-avatar {
+  width: 55px;
+  height: 55px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 50%;
+  background: #6366f1;
+  color: white;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+/* User Information */
+
+.user-info h2 {
+  margin: 0;
+  font-size: 21px;
+}
+
+.user-info p {
+  margin: 6px 0 0;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* ==============================
+   Create Room Card
+============================== */
+
+.room-card {
+  max-width: 1152px;
+  margin: 0 auto 20px;
+  padding: 28px;
+  box-sizing: border-box;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+}
+
+/* Section Header */
+
+.section-header h2 {
+  margin: 0;
+  font-size: 21px;
+}
+
+.section-header p {
+  margin: 7px 0 22px;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* ==============================
+   Room Form
+============================== */
+
+.room-form {
+  display: flex;
+  gap: 12px;
+}
+
+.room-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 13px 15px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  color: #f8fafc;
+  font-size: 15px;
+  outline: none;
+  transition: 0.2s ease;
+}
+
+.room-form input::placeholder {
+  color: #64748b;
+}
+
+.room-form input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+/* ==============================
+   Create Room Button
+============================== */
+
+.create-room-button {
+  padding: 13px 20px;
+  border: none;
+  border-radius: 8px;
+  background: #6366f1;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.create-room-button:hover {
+  background: #4f46e5;
+}
+
+/* ==============================
+   Join Room Card
+============================== */
+
+.join-room-card {
+  max-width: 1152px;
+  margin: 0 auto 35px;
+  padding: 28px;
+  box-sizing: border-box;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+}
+
+/* ==============================
+   Join Room Form
+============================== */
+
+.join-room-form {
+  display: flex;
+  gap: 12px;
+}
+
+.join-room-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 13px 15px;
+  background: #0f172a;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  color: #f8fafc;
+  font-size: 15px;
+  outline: none;
+  transition: 0.2s ease;
+}
+
+.join-room-form input::placeholder {
+  color: #64748b;
+}
+
+.join-room-form input:focus {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
+}
+
+/* ==============================
+   Join Room Button
+============================== */
+
+.join-room-button {
+  padding: 13px 24px;
+  border: none;
+  border-radius: 8px;
+  background: #22c55e;
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.join-room-button:hover {
+  background: #16a34a;
+}
+
+.join-room-button:disabled {
+  background: #475569;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+/* ==============================
+   Messages
+============================== */
+
+.success-message {
+  margin: 16px 0 0;
+  color: #4ade80;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.error-message {
+  margin: 16px 0 0;
+  color: #f87171;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* ==============================
+   My Rooms Section
+============================== */
+
+.rooms-section {
+  max-width: 1152px;
+  margin: 0 auto;
+}
+
+.rooms-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.rooms-header h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.rooms-header p {
+  margin: 6px 0 0;
+  color: #94a3b8;
+  font-size: 14px;
+}
+
+/* Room Count */
+
+.room-count {
+  padding: 7px 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 20px;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+/* ==============================
+   Rooms Grid
+============================== */
+
+.rooms-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+/* ==============================
+   Room Item
+============================== */
+
+.room-item {
+  padding: 22px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  transition: 0.2s ease;
+}
+
+.room-item:hover {
+  transform: translateY(-2px);
+  border-color: #475569;
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.2);
+}
+
+/* ==============================
+   Room Header
+============================== */
+
+.room-item-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 22px;
+}
+
+.room-item-header h3 {
+  margin: 0;
+  font-size: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Room Icon */
+
+.room-icon {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 8px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* ==============================
+   Room ID
+============================== */
+
+.room-id {
+  margin: 0 0 5px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.room-id-value {
+  margin: 0 0 14px;
+  color: #94a3b8;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==============================
+   Copy Room ID Button
+============================== */
+
+.copy-room-button {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 10px;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.copy-room-button:hover {
+  background: #334155;
+  border-color: #64748b;
+  color: #f8fafc;
+}
+
+/* ==============================
+   Open Room Button
+============================== */
+
+.open-room-button {
+  width: 100%;
+  padding: 11px;
+  border: 1px solid #475569;
+  border-radius: 8px;
+  background: #0f172a;
+  color: #f8fafc;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.open-room-button:hover {
+  background: #6366f1;
+  border-color: #6366f1;
+}
+
+/* ==============================
+   Empty Rooms
+============================== */
+
+.empty-rooms {
+  padding: 55px 25px;
+  text-align: center;
+  background: #1e293b;
+  border: 1px dashed #475569;
+  border-radius: 12px;
+}
+
+.empty-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin: 0 auto 15px;
+  border-radius: 50%;
+  background: rgba(99, 102, 241, 0.15);
+  color: #818cf8;
+  font-size: 25px;
+}
+
+.empty-rooms h3 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.empty-rooms p {
+  max-width: 400px;
+  margin: 8px auto 0;
+  color: #94a3b8;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ==============================
+   Loading
+============================== */
+
+.dashboard-loading {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0f172a;
+  color: #f8fafc;
+}
+
+.dashboard-loading h1 {
+  font-size: 20px;
+  font-weight: 500;
+}
+
+/* ==============================
+   Responsive
+============================== */
+
+@media (max-width: 768px) {
+  .dashboard {
+    padding: 25px 20px;
+  }
+
+  .dashboard-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  .logout-button {
+    width: 100%;
+  }
+
+  .room-form {
+    flex-direction: column;
+  }
+
+  .create-room-button {
+    width: 100%;
+  }
+
+  .join-room-form {
+    flex-direction: column;
+  }
+
+  .join-room-button {
+    width: 100%;
+  }
+
+  .rooms-header {
+    align-items: flex-start;
+    gap: 15px;
+    flex-direction: column;
+  }
+
+  .rooms-grid {
+    grid-template-columns: 1fr;
+  }
+}
