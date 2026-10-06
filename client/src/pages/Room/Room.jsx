@@ -43,8 +43,11 @@ function Room() {
   // Room for which the current presence list is valid
   const presenceRoomRef = useRef(null);
 
-  // Bottom of the chat list (used for auto-scroll)
+  // Bottom of the chat list (kept from the previous auto-scroll)
   const chatEndRef = useRef(null);
+
+  // Chat messages container (used for auto-scroll)
+  const chatMessagesRef = useRef(null);
 
   // Monaco editor instance
   const editorRef = useRef(null);
@@ -190,12 +193,24 @@ function Room() {
 
   // =========================================================
   // AUTO-SCROLL CHAT TO NEWEST MESSAGE
+  //
+  // New message
+  //     |
+  // messages state
+  //     |
+  // useEffect
+  //     |
+  // scroll to bottom
   // =========================================================
 
   useEffect(() => {
-    if (chatEndRef.current) {
-      chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+    const container = chatMessagesRef.current;
+
+    if (!container) {
+      return;
     }
+
+    container.scrollTop = container.scrollHeight;
   }, [messages]);
 
   // =========================================================
@@ -1586,12 +1601,14 @@ function Room() {
   const handleSendMessage = () => {
     const message = chatInput.trim();
 
-    if (!message) return;
+    if (!message) {
+      return;
+    }
 
     const socket = socketRef.current;
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setError("Not connected. Message was not sent.");
+      setError("You are currently disconnected.");
 
       return;
     }
@@ -1653,6 +1670,15 @@ function Room() {
 
   // =========================================================
   // RENDER REMOTE CURSORS (MONACO DECORATIONS)
+  //
+  // User A -> file1 -> cursor visible
+  // User B -> file2 -> cursor hidden
+  //
+  // User A switches to file2
+  //      |
+  // file1 cursor removed
+  //      |
+  // file2 cursor displayed
   // =========================================================
 
   useEffect(() => {
@@ -1662,41 +1688,65 @@ function Room() {
       return;
     }
 
-    const currentFile = selectedFileRef.current;
+    const currentFileId = selectedFileRef.current?.id;
 
-    const decorations = Object.values(remoteCursors)
-      .filter((cursor) => currentFile && cursor.fileId === currentFile.id)
-      .map((cursor) => {
-        const colorIndex = (Math.abs(Number(cursor.userId)) || 0) % 8;
+    /*
+     * Only display cursors belonging to
+     * the currently selected file.
+     */
+    const visibleCursors = Object.values(remoteCursors).filter(
+      (cursor) => cursor.fileId === currentFileId
+    );
 
-        return {
-          range: {
-            startLineNumber: cursor.lineNumber,
-            startColumn: cursor.column,
-            endLineNumber: cursor.lineNumber,
-            endColumn: cursor.column,
+    const decorations = visibleCursors.map((cursor) => {
+      const colorIndex = (Math.abs(Number(cursor.userId)) || 0) % 8;
+
+      return {
+        range: {
+          startLineNumber: cursor.lineNumber,
+          startColumn: cursor.column,
+          endLineNumber: cursor.lineNumber,
+          endColumn: cursor.column,
+        },
+
+        options: {
+          beforeContentClassName: `remote-cursor remote-cursor-color-${colorIndex}`,
+
+          after: {
+            content: cursor.username || "User",
+            inlineClassName: `remote-cursor-label remote-cursor-color-${colorIndex}`,
           },
 
-          options: {
-            beforeContentClassName: `remote-cursor remote-cursor-color-${colorIndex}`,
-
-            after: {
-              content: cursor.username || "User",
-              inlineClassName: `remote-cursor-label remote-cursor-color-${colorIndex}`,
-            },
-
-            hoverMessage: {
-              value: `**${cursor.username || "User"}**`,
-            },
+          hoverMessage: {
+            value: `**${cursor.username || "User"}**`,
           },
-        };
-      });
+        },
+      };
+    });
 
-    // Replace old decorations with the new set
-    remoteCursorDecorationsRef.current = editor.deltaDecorations(
-      remoteCursorDecorationsRef.current,
+    /*
+     * Get all currently active decoration IDs.
+     */
+    const oldDecorations = Object.values(remoteCursorDecorationsRef.current);
+
+    /*
+     * Replace old decorations.
+     */
+    const newDecorations = editor.deltaDecorations(
+      oldDecorations,
       decorations
     );
+
+    /*
+     * Store the new decoration IDs by user.
+     */
+    const newDecorationMap = {};
+
+    visibleCursors.forEach((cursor, index) => {
+      newDecorationMap[cursor.userId] = newDecorations[index];
+    });
+
+    remoteCursorDecorationsRef.current = newDecorationMap;
   }, [remoteCursors, selectedFile, code]);
 
   // =========================================================
@@ -1854,7 +1904,7 @@ function Room() {
           <div className="presence-section">
             <div className="presence-header">
               <div>
-                <h3>Online Users</h3>
+                <h3>Online Users ({onlineUsers.length})</h3>
 
                 <p>
                   {onlineUsers.length}{" "}
@@ -1873,7 +1923,12 @@ function Room() {
                   <div key={user.userId} className="presence-user">
                     <span className="presence-dot"></span>
 
-                    <span className="presence-username">{user.username}</span>
+                    <span className="presence-username">
+                      {user.username}
+                      {currentUserId !== null &&
+                        String(user.userId) === String(currentUserId) &&
+                        " (You)"}
+                    </span>
                   </div>
                 ))
               )}
@@ -2072,9 +2127,11 @@ function Room() {
         <aside className="chat-section">
           <h3>Chat</h3>
 
-          <div className="chat-messages">
+          <div className="chat-messages" ref={chatMessagesRef}>
             {messages.length === 0 ? (
-              <div className="no-chat-messages">No messages yet</div>
+              <div className="no-chat-messages chat-empty">
+                No messages yet. Start the conversation!
+              </div>
             ) : (
               messages.map((message) => (
                 <div
@@ -2110,7 +2167,14 @@ function Room() {
               maxLength={2000}
             />
 
-            <button onClick={handleSendMessage}>Send</button>
+            <button
+              onClick={handleSendMessage}
+              disabled={
+                connectionStatus !== "Connected" || !chatInput.trim()
+              }
+            >
+              Send
+            </button>
           </div>
         </aside>
       </main>

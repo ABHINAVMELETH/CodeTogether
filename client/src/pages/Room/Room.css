@@ -1324,3 +1324,60 @@
 .remote-cursor-label.remote-cursor-color-5 { background: #ec4899; }
 .remote-cursor-label.remote-cursor-color-6 { background: #14b8a6; }
 .remote-cursor-label.remote-cursor-color-7 { background: #f97316; }
+
+
+/* =========================================================
+   4F.5 — CHAT APPEARANCE  (append to the end of Room.css)
+   ========================================================= */
+
+.chat-message {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #f3f4f6;
+  max-width: 90%;
+}
+
+.chat-message-user {
+  font-size: 12px;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+
+.chat-message-text {
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.chat-input-row input {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  outline: none;
+}
+
+.chat-input-row input:focus {
+  border-color: #6366f1;
+}
+
+.chat-input-row button {
+  border: none;
+  border-radius: 6px;
+  background: #2563eb;
+  color: white;
+  font-weight: 600;
+}
+
+.chat-input-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* =========================================================
+   4F.8 — EMPTY CHAT STATE
+   ========================================================= */
+
+.chat-empty {
+  text-align: center;
+  padding: 30px 10px;
+  color: #6b7280;
+  font-size: 13px;
+}
