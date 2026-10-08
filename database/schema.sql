@@ -45,12 +45,11 @@ CREATE TABLE files (
     filename VARCHAR(255) NOT NULL,
     language VARCHAR(50),
     content TEXT DEFAULT '',
+    yjs_state BYTEA,
+    revision INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-    FOREIGN KEY (room_id)
-        REFERENCES rooms(id)
-        ON DELETE CASCADE
+    FOREIGN KEY (room_id) REFERENCES rooms(id) ON DELETE CASCADE
 );
 
 -- Room chat messages

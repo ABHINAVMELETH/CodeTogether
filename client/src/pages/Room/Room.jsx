@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import Editor from "@monaco-editor/react";
+import * as Y from "yjs";
+import { MonacoBinding } from "y-monaco";
 import "./Room.css";
 
 function Room() {
@@ -12,6 +14,12 @@ function Room() {
   // =========================================================
 
   const socketRef = useRef(null);
+
+  // Yjs document, shared text and observer
+  const yDocRef = useRef(null);
+  const yTextRef = useRef(null);
+  const yObserverRef = useRef(null);
+  const yBindingRef = useRef(null);
 
   // Prevent Monaco from treating remote changes as local edits
   const isRemoteChange = useRef(false);
@@ -126,6 +134,142 @@ function Room() {
   };
 
   const currentUserId = getCurrentUserId();
+
+  // =========================================================
+  // INITIALIZE YJS DOCUMENT
+  // =========================================================
+
+  const initializeYjsDocument = (
+    fileId
+  ) => {
+    /*
+     * Destroy previous document.
+     */
+    if (yDocRef.current) {
+      yDocRef.current.destroy();
+    }
+
+    /*
+     * Create new Yjs document.
+     */
+    const doc = new Y.Doc();
+
+    /*
+     * Get collaborative text.
+     */
+    const text = doc.getText("content");
+
+    yDocRef.current = doc;
+    yTextRef.current = text;
+
+    /*
+     * Request initial state from server.
+     */
+    const socket = socketRef.current;
+
+    if (
+      socket &&
+      socket.readyState === WebSocket.OPEN
+    ) {
+      socket.send(
+        JSON.stringify({
+          type: "yjs-sync-request",
+          fileId,
+        })
+      );
+    }
+  };
+
+  // =========================================================
+  // SETUP YJS DOCUMENT (with update sender)
+  // =========================================================
+
+  const setupYjsDocument = (fileId) => {
+    /*
+     * -------------------------------------------------------
+     * Clean up previous Yjs document
+     * -------------------------------------------------------
+     */
+
+    if (yBindingRef.current) {
+      yBindingRef.current.destroy();
+      yBindingRef.current = null;
+    }
+
+    if (yDocRef.current) {
+      yDocRef.current.destroy();
+      yDocRef.current = null;
+    }
+
+    /*
+     * -------------------------------------------------------
+     * Create new Yjs document
+     * -------------------------------------------------------
+     */
+
+    const doc = new Y.Doc();
+
+    const text = doc.getText("content");
+
+    yDocRef.current = doc;
+    yTextRef.current = text;
+
+    /*
+     * -------------------------------------------------------
+     * Send local Yjs updates to server
+     * -------------------------------------------------------
+     */
+
+    const updateHandler = (
+      update,
+      origin
+    ) => {
+      const socket = socketRef.current;
+
+      /*
+       * Ignore updates that came from the server.
+       *
+       * Otherwise:
+       *
+       * Server update
+       *     ↓
+       * Client
+       *     ↓
+       * send back
+       *     ↓
+       * Server
+       *     ↓
+       * broadcast
+       *
+       * This would create a loop.
+       */
+      if (origin === "remote") {
+        return;
+      }
+
+      if (
+        !socket ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      socket.send(
+        JSON.stringify({
+          type: "yjs-update",
+          fileId,
+          update: Array.from(update),
+        })
+      );
+    };
+
+    doc.on(
+      "update",
+      updateHandler
+    );
+
+    return doc;
+  };
 
   // =========================================================
   // GET ALL FILES
@@ -477,6 +621,97 @@ function Room() {
           const data = JSON.parse(event.data);
 
           console.log("WebSocket message:", data);
+
+          // =================================================
+          // YJS INITIAL SYNC
+          // =================================================
+
+          if (data.type === "yjs-sync") {
+            const {
+              fileId,
+              update,
+            } = data;
+
+            const currentFile =
+              selectedFileRef.current;
+
+            if (
+              !currentFile ||
+              currentFile.id !== fileId
+            ) {
+              return;
+            }
+
+            if (!yDocRef.current) {
+              return;
+            }
+
+            try {
+              Y.applyUpdate(
+                yDocRef.current,
+                new Uint8Array(update),
+                "remote"
+              );
+
+              /*
+               * Yjs is now the source of truth.
+               */
+              const currentText =
+                yTextRef.current?.toString() || "";
+
+              setCode(currentText);
+
+              isDirtyRef.current = false;
+              setSaveStatus("Saved");
+            } catch (error) {
+              console.error(
+                "Failed to apply Yjs sync:",
+                error
+              );
+            }
+
+            return;
+          }
+
+          // =================================================
+          // YJS REMOTE UPDATE
+          // =================================================
+
+          if (data.type === "yjs-update") {
+            const {
+              fileId,
+              update,
+            } = data;
+
+            const currentFile =
+              selectedFileRef.current;
+
+            if (
+              !currentFile ||
+              currentFile.id !== fileId
+            ) {
+              return;
+            }
+
+            if (!yDocRef.current) {
+              return;
+            }
+
+            try {
+              Y.applyUpdate(
+                yDocRef.current,
+                new Uint8Array(update),
+                "remote"
+              );
+            } catch (error) {
+              console.error(
+                "Failed to apply remote Yjs update:",
+                error
+              );
+            }
+
+            return;
+          }
 
           // =================================================
           // ROOM PRESENCE UPDATE
@@ -1358,6 +1593,24 @@ function Room() {
   }, [roomId]);
 
   // =========================================================
+  // CLEAN UP YJS ON LEAVING THE ROOM
+  // =========================================================
+
+  useEffect(() => {
+    return () => {
+      if (yBindingRef.current) {
+        yBindingRef.current.destroy();
+        yBindingRef.current = null;
+      }
+
+      if (yDocRef.current) {
+        yDocRef.current.destroy();
+        yDocRef.current = null;
+      }
+    };
+  }, []);
+
+  // =========================================================
   // CREATE A NEW FILE
   // =========================================================
 
@@ -1480,6 +1733,11 @@ function Room() {
       setSaveStatus("Saved");
 
       isDirtyRef.current = false;
+
+      /*
+       * Initialize Yjs for this file.
+       */
+      setupYjsDocument(loadedFile.id);
     } catch (error) {
       console.error(error);
 
@@ -1969,11 +2227,16 @@ function Room() {
 
               <div className="editor-container">
                 <Editor
+                  key={selectedFile?.id || "no-file"}
                   height="calc(100% - 50px)"
                   language={selectedFile.language || "plaintext"}
-                  value={code}
-                  onMount={(editor) => {
+                  defaultValue={code}
+                  onMount={(editor, monaco) => {
                     editorRef.current = editor;
+
+                    // ===================================================
+                    // REMOTE CURSOR SENDING (unchanged)
+                    // ===================================================
 
                     const sendCursor = (position) => {
                       const socket = socketRef.current;
@@ -2019,64 +2282,85 @@ function Room() {
                         }
                       }, 50);
                     });
+
+                    // ===================================================
+                    // YJS + MONACO BINDING
+                    // ===================================================
+
+                    /*
+                     * -------------------------------------------------------
+                     * Create Yjs document for current file
+                     * -------------------------------------------------------
+                     */
+
+                    const currentFile =
+                      selectedFileRef.current;
+
+                    if (!currentFile) {
+                      return;
+                    }
+
+                    const doc = setupYjsDocument(
+                      currentFile.id
+                    );
+
+                    const text =
+                      doc.getText("content");
+
+                    /*
+                     * -------------------------------------------------------
+                     * Bind Y.Text to Monaco
+                     * -------------------------------------------------------
+                     */
+
+                    const binding = new MonacoBinding(
+                      text,
+                      editor.getModel(),
+                      new Set([editor])
+                    );
+
+                    yBindingRef.current = binding;
+
+                    /*
+                     * -------------------------------------------------------
+                     * Ask server for current document state
+                     * -------------------------------------------------------
+                     */
+
+                    const socket = socketRef.current;
+
+                    if (
+                      socket &&
+                      socket.readyState === WebSocket.OPEN
+                    ) {
+                      socket.send(
+                        JSON.stringify({
+                          type: "yjs-sync-request",
+                          fileId: currentFile.id,
+                        })
+                      );
+                    }
                   }}
                   onChange={(value) => {
                     const newCode = value || "";
 
-                    /*
-                     * Update editor content.
-                     */
                     setCode(newCode);
 
+                    setSaveStatus("Unsaved");
+
                     /*
-                     * Monaco can fire onChange
-                     * because of a remote update.
+                     * Yjs / MonacoBinding is now responsible
+                     * for synchronization.
+                     *
+                     * Do NOT send code-change here.
                      */
+
                     if (isRemoteChange.current) {
                       isRemoteChange.current = false;
-
-                      setSaveStatus("Saved");
-
-                      isDirtyRef.current = false;
-
                       return;
                     }
 
-                    /*
-                     * Genuine local edit.
-                     */
-                    setSaveStatus("Unsaved");
-
                     isDirtyRef.current = true;
-
-                    const currentFile = selectedFileRef.current;
-
-                    const socket = socketRef.current;
-
-                    /*
-                     * Send local change to
-                     * WebSocket server.
-                     */
-                    if (
-                      socket &&
-                      socket.readyState === WebSocket.OPEN &&
-                      currentFile
-                    ) {
-                      const revision =
-                        localRevisionRef.current ?? currentFile.revision;
-
-                      socket.send(
-                        JSON.stringify({
-                          type: "code-change",
-
-                          fileId: currentFile.id,
-
-                          content: newCode,
-
-                          revision: revision,
-                        })
-                      );
-                    }
                   }}
                   theme="vs-dark"
                   options={{

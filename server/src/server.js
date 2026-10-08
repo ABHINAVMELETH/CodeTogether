@@ -3,9 +3,19 @@ require("dotenv").config();
 const http = require("http");
 const WebSocket = require("ws");
 const jwt = require("jsonwebtoken");
+const Y = require("yjs");
 
 const app = require("./app");
 const pool = require("./config/db");
+
+
+const {
+  getDocument,
+  initializeDocument,
+  getDocumentText,
+  hasDocument,
+  getDocumentState,
+} = require("./services/yjsService");
 
 const PORT = process.env.PORT || 5000;
 
@@ -21,6 +31,140 @@ const wss = new WebSocket.Server({
 //
 // roomKey (string) -> Set(socket)
 const rooms = new Map();
+
+// Pending debounced Yjs saves
+//
+// fileId (string) -> { timer, fileId }
+const yjsPersistenceTimers = new Map();
+
+
+
+/*
+ * =========================================================
+ * PERSIST YJS DOCUMENT
+ * =========================================================
+ */
+
+const persistYjsDocument = async (
+  fileId
+) => {
+  try {
+    /*
+     * Get current CRDT state.
+     */
+    const state =
+      getDocumentState(fileId);
+
+    /*
+     * Get human-readable code.
+     */
+    const content =
+      getDocumentText(fileId);
+
+    /*
+     * Save both representations.
+     */
+    const result = await pool.query(
+      `UPDATE files
+       SET
+         content = $1,
+         yjs_state = $2,
+         updated_at = CURRENT_TIMESTAMP,
+         revision = revision + 1
+       WHERE id = $3
+       RETURNING revision`,
+      [
+        content,
+        Buffer.from(state),
+        fileId,
+      ]
+    );
+
+    if (result.rows.length > 0) {
+      console.log(
+        `Yjs document persisted: ${fileId}`
+      );
+    }
+
+  } catch (error) {
+    console.error(
+      `Failed to persist Yjs document ${fileId}:`,
+      error
+    );
+  }
+};
+
+/*
+ * =========================================================
+ * SCHEDULE YJS PERSISTENCE (debounced)
+ * =========================================================
+ */
+
+const scheduleYjsPersistence = (fileId) => {
+  const key = String(fileId);
+
+  /*
+   * Cancel previous timer.
+   */
+  const existing = yjsPersistenceTimers.get(key);
+
+  if (existing) {
+    clearTimeout(existing.timer);
+  }
+
+  /*
+   * Wait until the user stops typing.
+   */
+  const timer = setTimeout(async () => {
+    yjsPersistenceTimers.delete(key);
+
+    await persistYjsDocument(fileId);
+  }, 2000);
+
+  yjsPersistenceTimers.set(key, { timer, fileId });
+};
+
+/*
+ * =========================================================
+ * PERSIST ROOM DOCUMENTS (flush pending saves)
+ * =========================================================
+ *
+ * Saves only files with an unsaved change (a pending timer)
+ * AND an active Yjs document in memory, so we never write a
+ * document that isn't loaded.
+ */
+
+const persistRoomDocuments = async (roomId) => {
+  try {
+    const result = await pool.query(
+      `SELECT id
+       FROM files
+       WHERE room_id = $1`,
+      [roomId]
+    );
+
+    for (const file of result.rows) {
+      const pending = yjsPersistenceTimers.get(String(file.id));
+
+      if (!pending) {
+        continue;
+      }
+
+      clearTimeout(pending.timer);
+      yjsPersistenceTimers.delete(String(file.id));
+
+      /*
+       * Only persist documents that are currently
+       * loaded into Yjs memory.
+       */
+      if (hasDocument(pending.fileId)) {
+        await persistYjsDocument(pending.fileId);
+      }
+    }
+  } catch (error) {
+    console.error("Room persistence error:", error);
+  }
+};
 
 /*
  * =========================================================
@@ -652,6 +796,213 @@ if (data.type === "cursor-position") {
   return;
 }
 
+// =========================================================
+// YJS UPDATE
+// =========================================================
+
+if (data.type === "yjs-update") {
+  if (!socket.roomId) {
+    return;
+  }
+
+  const {
+    fileId,
+    update,
+  } = data;
+
+  if (
+    !fileId ||
+    !Array.isArray(update)
+  ) {
+    return;
+  }
+
+  try {
+    /*
+     * Make sure the file belongs to this room.
+     */
+    const result = await pool.query(
+      `SELECT id
+       FROM files
+       WHERE id = $1
+       AND room_id = $2`,
+      [
+        fileId,
+        socket.roomId,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return;
+    }
+
+    /*
+     * Get the Yjs document.
+     */
+    const doc = getDocument(fileId);
+
+    /*
+     * Convert JSON array back to Uint8Array.
+     */
+    const uint8Update =
+      new Uint8Array(update);
+
+    /*
+     * Apply CRDT update.
+     */
+    Y.applyUpdate(
+      doc,
+      uint8Update
+    );
+
+    /*
+     * Persist after a short delay.
+     */
+    scheduleYjsPersistence(fileId);
+
+    /*
+     * Broadcast the update to
+     * every other client in the room.
+     */
+    const room = rooms.get(
+      socket.roomId
+    );
+
+    if (!room) {
+      return;
+    }
+
+    const payload = JSON.stringify({
+      type: "yjs-update",
+      fileId,
+      update: Array.from(
+        uint8Update
+      ),
+    });
+
+    room.forEach((client) => {
+      if (
+        client !== socket &&
+        client.readyState === WebSocket.OPEN
+      ) {
+        client.send(payload);
+      }
+    });
+  } catch (error) {
+    console.error(
+      "Yjs update error:",
+      error
+    );
+  }
+
+  return;
+}
+
+
+    // =========================================================
+// YJS INITIAL SYNCHRONIZATION
+// =========================================================
+
+if (data.type === "yjs-sync-request") {
+  if (!socket.roomId) {
+    return;
+  }
+
+  const { fileId } = data;
+
+  if (!fileId) {
+    return;
+  }
+
+  try {
+    /*
+     * -----------------------------------------------------
+     * Load file from PostgreSQL
+     * -----------------------------------------------------
+     */
+
+    const result = await pool.query(
+      `SELECT
+         id,
+         content,
+         yjs_state
+       FROM files
+       WHERE id = $1
+       AND room_id = $2`,
+      [
+        fileId,
+        socket.roomId,
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      socket.send(
+        JSON.stringify({
+          type: "yjs-sync-error",
+          fileId,
+          message: "File not found",
+        })
+      );
+
+      return;
+    }
+
+    const file = result.rows[0];
+
+    /*
+     * -----------------------------------------------------
+     * Initialize / restore Yjs document
+     * -----------------------------------------------------
+     */
+
+    const doc = initializeDocument(
+      fileId,
+      file.content || "",
+      file.yjs_state
+    );
+
+    /*
+     * -----------------------------------------------------
+     * Encode complete CRDT state
+     * -----------------------------------------------------
+     */
+
+    const state =
+      Y.encodeStateAsUpdate(doc);
+
+    /*
+     * -----------------------------------------------------
+     * Send state to client
+     * -----------------------------------------------------
+     */
+
+    socket.send(
+      JSON.stringify({
+        type: "yjs-sync",
+        fileId,
+        update: Array.from(state),
+      })
+    );
+
+  } catch (error) {
+    console.error(
+      "Yjs synchronization error:",
+      error
+    );
+
+    socket.send(
+      JSON.stringify({
+        type: "yjs-sync-error",
+        fileId,
+        message:
+          "Unable to synchronize document",
+      })
+    );
+  }
+
+  return;
+}
+
       // --------------------------------------------
       // CODE CHANGE
       // --------------------------------------------
@@ -1085,6 +1436,12 @@ if (data.type === "cursor-position") {
     const roomId = socket.roomId;
 
     if (roomId) {
+      /*
+       * Flush any unsaved Yjs changes for this room.
+       * Not awaited so the close handler stays synchronous.
+       */
+      persistRoomDocuments(roomId);
+
       /*
        * IMPORTANT:
        *
