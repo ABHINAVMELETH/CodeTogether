@@ -5,6 +5,9 @@ const WebSocket = require("ws");
 const jwt = require("jsonwebtoken");
 const Y = require("yjs");
 
+const SERVER_ID =
+  `${process.pid}-${Date.now()}`;
+
 const app = require("./app");
 const pool = require("./config/db");
 
@@ -16,6 +19,12 @@ const {
   hasDocument,
   getDocumentState,
 } = require("./services/yjsService");
+
+const {
+  redisSubscriber,
+  publish,
+  closeRedis,
+} = require("./services/redisService");
 
 const PORT = process.env.PORT || 5000;
 
@@ -32,6 +41,13 @@ const wss = new WebSocket.Server({
 // roomKey (string) -> Set(socket)
 const rooms = new Map();
 
+const redisRoomSubscriptions =
+  new Set();
+
+const getRedisChannel = (roomId) => {
+  return `codetogether:room:${roomId}`;
+};
+
 // Pending debounced Yjs saves
 //
 // fileId (string) -> { timer, fileId }
@@ -45,52 +61,76 @@ const yjsPersistenceTimers = new Map();
  * =========================================================
  */
 
-const persistYjsDocument = async (
-  fileId
-) => {
+
+const persistYjsDocument = async (fileId) => {
+  const client = await pool.connect();
+
   try {
-    /*
-     * Get current CRDT state.
-     */
-    const state =
-      getDocumentState(fileId);
+    const content = getDocumentText(fileId);
+    const state = getDocumentState(fileId);
 
-    /*
-     * Get human-readable code.
-     */
-    const content =
-      getDocumentText(fileId);
+    await client.query("BEGIN");
 
-    /*
-     * Save both representations.
-     */
-    const result = await pool.query(
-      `UPDATE files
-       SET
-         content = $1,
-         yjs_state = $2,
-         updated_at = CURRENT_TIMESTAMP,
-         revision = revision + 1
-       WHERE id = $3
-       RETURNING revision`,
-      [
-        content,
-        Buffer.from(state),
-        fileId,
-      ]
+    // Lock the file row while updating its snapshot.
+    const currentResult = await client.query(
+      `SELECT content, revision
+       FROM files
+       WHERE id = $1
+       FOR UPDATE`,
+      [fileId]
     );
 
-    if (result.rows.length > 0) {
-      console.log(
-        `Yjs document persisted: ${fileId}`
-      );
+    if (currentResult.rows.length === 0) {
+      await client.query("COMMIT");
+      return;
     }
 
-  } catch (error) {
-    console.error(
-      `Failed to persist Yjs document ${fileId}:`,
-      error
+    const current = currentResult.rows[0];
+
+    // Avoid creating duplicate versions for unchanged content.
+    if (current.content === content) {
+      await client.query(
+        `UPDATE files
+         SET yjs_state = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $2`,
+        [Buffer.from(state), fileId]
+      );
+
+      await client.query("COMMIT");
+      return;
+    }
+
+    const updatedResult = await client.query(
+      `UPDATE files
+       SET content = $1,
+           yjs_state = $2,
+           revision = revision + 1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $3
+       RETURNING revision`,
+      [content, Buffer.from(state), fileId]
     );
+
+    const revision = updatedResult.rows[0].revision;
+
+    await client.query(
+      `INSERT INTO file_versions
+         (file_id, revision, content)
+       VALUES ($1, $2, $3)`,
+      [fileId, revision, content]
+    );
+
+    await client.query("COMMIT");
+
+    console.log(
+      `Version ${revision} saved for file ${fileId}`
+    );
+  } catch (error) {
+    await client.query("ROLLBACK");
+    console.error("Yjs persistence failed:", error);
+  } finally {
+    client.release();
   }
 };
 
@@ -231,6 +271,149 @@ const {
 const roomKey = (roomId) => String(roomId);
 
 
+// =========================================================
+// REDIS: subscribe / unsubscribe / receive
+// =========================================================
+
+const subscribeToRoom = async (
+  roomId
+) => {
+  const channel =
+    getRedisChannel(roomId);
+
+  if (
+    redisRoomSubscriptions.has(
+      channel
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await redisSubscriber.subscribe(
+      channel
+    );
+
+    redisRoomSubscriptions.add(
+      channel
+    );
+
+    console.log(
+      `Redis subscribed: ${channel}`
+    );
+  } catch (error) {
+    console.error(
+      `Failed to subscribe to Redis channel ${channel}:`,
+      error
+    );
+  }
+};
+
+const unsubscribeFromRoom = async (
+  roomId
+) => {
+  const channel =
+    getRedisChannel(roomId);
+
+  if (
+    !redisRoomSubscriptions.has(
+      channel
+    )
+  ) {
+    return;
+  }
+
+  try {
+    await redisSubscriber.unsubscribe(
+      channel
+    );
+
+    redisRoomSubscriptions.delete(
+      channel
+    );
+
+    console.log(
+      `Redis unsubscribed: ${channel}`
+    );
+  } catch (error) {
+    console.error(
+      `Failed to unsubscribe from Redis channel ${channel}:`,
+      error
+    );
+  }
+};
+
+redisSubscriber.on(
+  "message",
+  (channel, rawMessage) => {
+    try {
+      const message =
+        JSON.parse(rawMessage);
+
+      /*
+       * Ignore our own published message.
+       *
+       * The originating server already
+       * broadcasts to its local clients.
+       */
+      if (
+        message.serverId ===
+        SERVER_ID
+      ) {
+        return;
+      }
+
+      const roomId =
+        message.roomId;
+
+      if (!roomId) {
+        return;
+      }
+
+      // roomKey() so "5" and 5 resolve to the same Map key
+      const room =
+        rooms.get(roomKey(roomId));
+
+      if (!room) {
+        return;
+      }
+
+      const payload =
+        JSON.stringify(
+          message.payload
+        );
+
+      room.forEach((socket) => {
+        /*
+         * Don't send the message back
+         * to the original socket if this
+         * server happens to know it.
+         */
+        if (
+          socket.connectionId ===
+          message.senderConnectionId
+        ) {
+          return;
+        }
+
+        if (
+          socket.readyState ===
+          WebSocket.OPEN
+        ) {
+          socket.send(payload);
+        }
+      });
+
+    } catch (error) {
+      console.error(
+        "Redis message handling error:",
+        error
+      );
+    }
+  }
+);
+
+
 // --------------------------------------------------
 // Helper: Add socket to a room
 // --------------------------------------------------
@@ -268,6 +451,11 @@ const leaveRoom = (roomId, socket) => {
   // remove the room completely.
   if (room.size === 0) {
     rooms.delete(key);
+
+    unsubscribeFromRoom(
+      key
+    );
+
     console.log(`Room ${key} removed`);
   } else {
     console.log(`Socket left room ${key}`);
@@ -404,6 +592,11 @@ const authenticateSocket = async (socket, request) => {
     }
 
     socket.username = userResult.rows[0].username;
+
+    socket.connectionId =
+      `${SERVER_ID}-${Math.random()
+        .toString(36)
+        .slice(2)}`;
 
     console.log(
       `WebSocket authenticated for user ${socket.userId}`
@@ -558,6 +751,10 @@ wss.on("connection", (socket, request) => {
 
           // Add socket to room
           joinRoom(roomId, socket);
+
+          await subscribeToRoom(
+            roomId
+          );
 
           // Get authoritative presence
           const currentPresence = getRoomPresence(roomId);
@@ -860,34 +1057,59 @@ if (data.type === "yjs-update") {
      */
     scheduleYjsPersistence(fileId);
 
-    /*
-     * Broadcast the update to
-     * every other client in the room.
-     */
-    const room = rooms.get(
-      socket.roomId
-    );
-
-    if (!room) {
-      return;
-    }
-
-    const payload = JSON.stringify({
+    const payload = {
       type: "yjs-update",
       fileId,
       update: Array.from(
         uint8Update
       ),
-    });
+    };
 
-    room.forEach((client) => {
-      if (
-        client !== socket &&
-        client.readyState === WebSocket.OPEN
-      ) {
-        client.send(payload);
+    /*
+     * =========================================================
+     * BROADCAST LOCALLY
+     * =========================================================
+     */
+
+    const room =
+      rooms.get(socket.roomId);
+
+    if (room) {
+      const serializedPayload =
+        JSON.stringify(payload);
+
+      room.forEach((client) => {
+        if (
+          client !== socket &&
+          client.readyState ===
+            WebSocket.OPEN
+        ) {
+          client.send(
+            serializedPayload
+          );
+        }
+      });
+    }
+
+    /*
+     * =========================================================
+     * PUBLISH TO REDIS
+     * =========================================================
+     *
+     * Other Node.js server instances
+     * will receive this.
+     */
+
+    await publish(
+      getRedisChannel(socket.roomId),
+      {
+        serverId: SERVER_ID,
+        roomId: socket.roomId,
+        senderConnectionId:
+          socket.connectionId,
+        payload,
       }
-    });
+    );
   } catch (error) {
     console.error(
       "Yjs update error:",
@@ -1003,403 +1225,6 @@ if (data.type === "yjs-sync-request") {
   return;
 }
 
-      // --------------------------------------------
-      // CODE CHANGE
-      // --------------------------------------------
-
-      if (data.type === "code-change") {
-        if (!socket.roomId) {
-          return;
-        }
-
-        const { fileId, content, revision } = data;
-
-        if (!fileId) {
-          return;
-        }
-
-        if (typeof content !== "string") {
-          return;
-        }
-
-        if (typeof revision !== "number") {
-          return;
-        }
-
-        try {
-          // ----------------------------------------
-          // Check file belongs to current room
-          // ----------------------------------------
-
-          const fileResult = await pool.query(
-            `SELECT
-              id,
-              room_id,
-              revision
-             FROM files
-             WHERE id = $1
-             AND room_id = $2`,
-            [fileId, socket.roomId]
-          );
-
-          if (fileResult.rows.length === 0) {
-            socket.send(
-              JSON.stringify({
-                type: "code-change-error",
-                message: "File not found",
-              })
-            );
-
-            return;
-          }
-
-          const file = fileResult.rows[0];
-
-          /*
-           * Get server's current revision.
-           */
-          let currentRevision = getRevision(fileId);
-
-          /*
-           * If WebSocket revision store
-           * has never seen this file,
-           * initialize it from PostgreSQL.
-           */
-          if (currentRevision === undefined) {
-            currentRevision = Number(file.revision);
-
-            setRevision(fileId, currentRevision);
-          }
-
-          /*
-           * Client must be editing the
-           * latest server version.
-           */
-          if (revision !== currentRevision) {
-            socket.send(
-              JSON.stringify({
-                type: "stale-change",
-                fileId,
-                expectedRevision: currentRevision,
-                receivedRevision: revision,
-              })
-            );
-
-            return;
-          }
-
-          /*
-           * Atomically update database.
-           */
-          const updateResult = await pool.query(
-            `UPDATE files
-             SET
-               content = $1,
-               revision = revision + 1,
-               updated_at = CURRENT_TIMESTAMP
-             WHERE id = $2
-             AND room_id = $4
-             AND revision = $3
-             RETURNING
-               id,
-               room_id,
-               filename,
-               language,
-               content,
-               revision`,
-            [content, fileId, currentRevision, socket.roomId]
-          );
-
-          /*
-           * Update failed because someone else
-           * changed the file.
-           */
-          if (updateResult.rows.length === 0) {
-            const latestResult = await pool.query(
-              `SELECT
-                id,
-                content,
-                revision
-               FROM files
-               WHERE id = $1
-               AND room_id = $2`,
-              [fileId, socket.roomId]
-            );
-
-            if (latestResult.rows.length > 0) {
-              const latestFile = latestResult.rows[0];
-
-              const latestRevision = Number(latestFile.revision);
-
-              setRevision(fileId, latestRevision);
-
-              socket.send(
-                JSON.stringify({
-                  type: "stale-change",
-                  fileId,
-                  expectedRevision: latestRevision,
-                  receivedRevision: revision,
-                })
-              );
-            }
-
-            return;
-          }
-
-          const updatedFile = updateResult.rows[0];
-
-          const newRevision = Number(updatedFile.revision);
-
-          /*
-           * Keep WebSocket revision store
-           * synchronized with PostgreSQL.
-           */
-          setRevision(fileId, newRevision);
-
-          /*
-           * Broadcast accepted change
-           * to other clients.
-           */
-          const messageData = JSON.stringify({
-            type: "code-change",
-            fileId,
-            content: updatedFile.content,
-            revision: newRevision,
-          });
-
-          broadcastToRoom(socket.roomId, messageData, socket);
-
-          /*
-           * Confirm to sender.
-           */
-          socket.send(
-            JSON.stringify({
-              type: "change-accepted",
-              fileId,
-              revision: newRevision,
-            })
-          );
-        } catch (error) {
-          console.error("Code change error:", error);
-
-          socket.send(
-            JSON.stringify({
-              type: "code-change-error",
-              message: "Unable to process code change",
-            })
-          );
-        }
-
-        return;
-      }
-
-
-      // --------------------------------------------
-      // FILE CHECK
-      // --------------------------------------------
-
-      if (data.type === "check-file") {
-        try {
-          /*
-           * User must already be in a room.
-           */
-          if (!socket.roomId) {
-            return;
-          }
-
-          const { fileId, revision } = data;
-
-          console.log("📋 FILE CHECK REQUEST:", {
-            fileId,
-            clientRevision: revision,
-          });
-
-          // Validate fileId
-          if (!fileId) {
-            socket.send(
-              JSON.stringify({
-                type: "error",
-                message: "fileId is required",
-              })
-            );
-
-            return;
-          }
-
-          // ---------------------------------------
-          // Get latest file from database
-          // ---------------------------------------
-
-          const result = await pool.query(
-            `
-            SELECT
-              id,
-              revision
-            FROM files
-            WHERE id = $1
-            AND room_id = $2
-            `,
-            [fileId, socket.roomId]
-          );
-
-          // File not found
-          if (result.rows.length === 0) {
-            console.log("❌ FILE NOT FOUND:", fileId);
-
-            socket.send(
-              JSON.stringify({
-                type: "error",
-                message: "File not found",
-                fileId,
-              })
-            );
-
-            return;
-          }
-
-          const file = result.rows[0];
-
-          const serverRevision = Number(file.revision);
-
-          const clientRevision = Number(revision);
-
-          console.log("🔍 FILE REVISION CHECK:", {
-            fileId,
-            clientRevision,
-            serverRevision,
-          });
-
-          // ---------------------------------------
-          // FILE IN SYNC
-          // ---------------------------------------
-
-          if (clientRevision === serverRevision) {
-            console.log("✅ FILE IN SYNC:", {
-              fileId,
-              revision: serverRevision,
-            });
-
-            socket.send(
-              JSON.stringify({
-                type: "file-in-sync",
-                fileId: file.id,
-                revision: serverRevision,
-              })
-            );
-
-            return;
-          }
-
-          // ---------------------------------------
-          // FILE OUT OF SYNC
-          // ---------------------------------------
-
-          console.warn("⚠️ FILE OUT OF SYNC:", {
-            fileId,
-            clientRevision,
-            serverRevision,
-          });
-
-          socket.send(
-            JSON.stringify({
-              type: "file-out-of-sync",
-              fileId: file.id,
-              clientRevision,
-              serverRevision,
-            })
-          );
-        } catch (error) {
-          console.error(
-            "❌ Error checking file synchronization:",
-            error
-          );
-
-          socket.send(
-            JSON.stringify({
-              type: "error",
-              message: "Failed to check file synchronization",
-            })
-          );
-        }
-
-        return;
-      }
-
-
-      // --------------------------------------------
-      // REQUEST LATEST FILE STATE
-      // --------------------------------------------
-
-      if (data.type === "sync-file") {
-        if (!socket.roomId) {
-          return;
-        }
-
-        const { fileId } = data;
-
-        if (!fileId) {
-          return;
-        }
-
-        try {
-          const result = await pool.query(
-            `SELECT
-              id,
-              room_id,
-              filename,
-              language,
-              content,
-              revision
-             FROM files
-             WHERE id = $1
-             AND room_id = $2`,
-            [fileId, socket.roomId]
-          );
-
-          if (result.rows.length === 0) {
-            socket.send(
-              JSON.stringify({
-                type: "sync-error",
-                fileId,
-                message: "File not found",
-              })
-            );
-
-            return;
-          }
-
-          const file = result.rows[0];
-
-          /*
-           * PostgreSQL is the source of truth.
-           */
-          const serverRevision = Number(file.revision);
-
-          setRevision(fileId, serverRevision);
-
-          socket.send(
-            JSON.stringify({
-              type: "file-state",
-              fileId: file.id,
-              content: file.content || "",
-              revision: serverRevision,
-            })
-          );
-        } catch (error) {
-          console.error("File synchronization error:", error);
-
-          socket.send(
-            JSON.stringify({
-              type: "sync-error",
-              fileId,
-              message: "Unable to synchronize file",
-            })
-          );
-        }
-
-        return;
-      }
-
 
       // --------------------------------------------
       // ROOM MESSAGE
@@ -1474,26 +1299,49 @@ if (data.type === "yjs-sync-request") {
 
 // --------------------------------------------------
 // Graceful shutdown: stop the heartbeat timer so it
-// does not keep the Node process alive.
+// does not keep the Node process alive, then close
+// Redis, PostgreSQL and the HTTP server.
 // --------------------------------------------------
 
-process.on("SIGTERM", () => {
-  clearInterval(heartbeatInterval);
+const gracefulShutdown =
+  async () => {
+    console.log(
+      "Shutting down server..."
+    );
 
-  server.close(() => {
-    console.log("HTTP server closed");
-    process.exit(0);
-  });
-});
+    clearInterval(heartbeatInterval);
 
-process.on("SIGINT", () => {
-  clearInterval(heartbeatInterval);
+    try {
+      await closeRedis();
 
-  server.close(() => {
-    console.log("HTTP server closed");
-    process.exit(0);
-  });
-});
+      await pool.end();
+
+      server.close(() => {
+        console.log(
+          "Server closed"
+        );
+
+        process.exit(0);
+      });
+    } catch (error) {
+      console.error(
+        "Shutdown error:",
+        error
+      );
+
+      process.exit(1);
+    }
+  };
+
+process.on(
+  "SIGINT",
+  gracefulShutdown
+);
+
+process.on(
+  "SIGTERM",
+  gracefulShutdown
+);
 
 
 // --------------------------------------------------

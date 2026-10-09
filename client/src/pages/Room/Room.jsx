@@ -4,6 +4,7 @@ import Editor from "@monaco-editor/react";
 import * as Y from "yjs";
 import { MonacoBinding } from "y-monaco";
 import "./Room.css";
+import VersionHistory from "../../components/VersionHistory";
 
 function Room() {
   const { roomId } = useParams();
@@ -38,9 +39,6 @@ function Room() {
 
   // Whether current editor content has unsaved changes
   const isDirtyRef = useRef(false);
-
-  // Current local/server revision known by this client
-  const localRevisionRef = useRef(null);
 
   // Whether this WebSocket effect should reconnect
   const shouldReconnectRef = useRef(true);
@@ -307,8 +305,6 @@ function Room() {
 
           selectedFileRef.current = firstFile;
 
-          localRevisionRef.current = firstFile.revision;
-
           setCode(firstFile.content || "");
 
           setSaveStatus("Saved");
@@ -551,9 +547,17 @@ function Room() {
 
       setConnectionStatus("Connecting");
 
+
+      const pageParams = new URLSearchParams(window.location.search);
+
+      const wsPort = pageParams.get("wsPort") || "5000";
+
+      const socket = new WebSocket(`ws://localhost:${wsPort}?token=${encodeURIComponent(token)}`);
+      /*
       const socket = new WebSocket(
         `ws://localhost:5000?token=${encodeURIComponent(token)}`
       );
+      */
 
       socketRef.current = socket;
 
@@ -623,14 +627,11 @@ function Room() {
           console.log("WebSocket message:", data);
 
           // =================================================
-          // YJS INITIAL SYNC
+          // YJS SYNC (initial load + reconnect)
           // =================================================
 
           if (data.type === "yjs-sync") {
-            const {
-              fileId,
-              update,
-            } = data;
+            const { fileId, update } = data;
 
             const currentFile =
               selectedFileRef.current;
@@ -647,6 +648,12 @@ function Room() {
             }
 
             try {
+              /*
+               * Merge server state into the local Yjs document.
+               *
+               * Yjs does NOT simply overwrite local content.
+               * It merges CRDT updates.
+               */
               Y.applyUpdate(
                 yDocRef.current,
                 new Uint8Array(update),
@@ -654,8 +661,33 @@ function Room() {
               );
 
               /*
-               * Yjs is now the source of truth.
+               * Send our local state back to the server.
+               *
+               * This is important after reconnect.
+               *
+               * If we had edits that were created while
+               * disconnected, the server may not have them.
                */
+              const syncSocket = socketRef.current;
+
+              if (
+                syncSocket &&
+                syncSocket.readyState === WebSocket.OPEN
+              ) {
+                const localState =
+                  Y.encodeStateAsUpdate(
+                    yDocRef.current
+                  );
+
+                syncSocket.send(
+                  JSON.stringify({
+                    type: "yjs-update",
+                    fileId,
+                    update: Array.from(localState),
+                  })
+                );
+              }
+
               const currentText =
                 yTextRef.current?.toString() || "";
 
@@ -709,6 +741,18 @@ function Room() {
                 error
               );
             }
+
+            return;
+          }
+
+          // =================================================
+          // YJS SYNC ERROR
+          // =================================================
+
+          if (data.type === "yjs-sync-error") {
+            console.error("Yjs sync error:", data.message);
+
+            setError(data.message || "Unable to synchronize file");
 
             return;
           }
@@ -819,55 +863,30 @@ function Room() {
 
             const currentSocket = socketRef.current;
 
+            /*
+             * YJS RECONNECT SYNC
+             *
+             * WebSocket reconnect
+             *        ↓
+             * room-joined
+             *        ↓
+             * yjs-sync-request
+             *        ↓
+             * server sends Yjs state
+             *        ↓
+             * local Y.Doc merges state
+             */
             if (
               currentFile &&
               currentSocket &&
               currentSocket.readyState === WebSocket.OPEN
             ) {
-              /*
-               * CLEAN EDITOR
-               *
-               * Safe to request server state.
-               */
-              if (!isDirtyRef.current) {
-                console.log(
-                  "Editor is clean. Requesting file synchronization..."
-                );
-
-                currentSocket.send(
-                  JSON.stringify({
-                    type: "sync-file",
-
-                    fileId: currentFile.id,
-                  })
-                );
-              }
-
-              /*
-               * DIRTY EDITOR
-               *
-               * Never overwrite local changes.
-               *
-               * Ask server whether our revision
-               * is still current.
-               */
-              else {
-                console.log(
-                  "Editor has unsaved changes. Checking revision..."
-                );
-
-                currentSocket.send(
-                  JSON.stringify({
-                    type: "check-file",
-
-                    fileId: currentFile.id,
-
-                    revision: localRevisionRef.current,
-                  })
-                );
-
-                console.log("Preserving local content");
-              }
+              currentSocket.send(
+                JSON.stringify({
+                  type: "yjs-sync-request",
+                  fileId: currentFile.id,
+                })
+              );
             }
 
             /*
@@ -956,82 +975,6 @@ function Room() {
           }
 
           // =================================================
-          // FILE IN SYNC
-          // =================================================
-
-          if (data.type === "file-in-sync") {
-            console.log("✅ FILE IN SYNC CALLED", {
-              fileId: data.fileId,
-
-              revision: data.revision,
-            });
-
-            const currentFile = selectedFileRef.current;
-
-            if (currentFile && data.fileId === currentFile.id) {
-              /*
-               * Server confirmed that our local
-               * revision is still current.
-               *
-               * Do NOT overwrite local content.
-               */
-              if (typeof data.revision === "number") {
-                localRevisionRef.current = data.revision;
-
-                const updatedFile = {
-                  ...currentFile,
-
-                  revision: data.revision,
-                };
-
-                selectedFileRef.current = updatedFile;
-
-                setSelectedFile(updatedFile);
-
-                setFiles((previousFiles) =>
-                  previousFiles.map((file) =>
-                    file.id === data.fileId
-                      ? {
-                          ...file,
-
-                          revision: data.revision,
-                        }
-                      : file
-                  )
-                );
-              }
-            }
-
-            setError("");
-
-            setMessage("Reconnected. Local changes are ready.");
-
-            return;
-          }
-
-          // =================================================
-          // FILE OUT OF SYNC
-          // =================================================
-
-          if (data.type === "file-out-of-sync") {
-            console.warn("⚠️ Local file is out of sync:", data);
-
-            /*
-             * IMPORTANT:
-             *
-             * Never call sync-file here.
-             *
-             * Local unsaved content must remain
-             * untouched.
-             */
-            setError("The file changed while you were disconnected.");
-
-            setMessage("Your local changes were preserved. Review before saving.");
-
-            return;
-          }
-
-          // =================================================
           // ROOM ERROR
           // =================================================
 
@@ -1039,206 +982,6 @@ function Room() {
             console.error("Room error:", data.message);
 
             setError(data.message);
-
-            return;
-          }
-
-          // =================================================
-          // CODE CHANGE
-          // =================================================
-
-          if (data.type === "code-change") {
-            const currentFile = selectedFileRef.current;
-
-            if (currentFile && data.fileId === currentFile.id) {
-              /*
-               * Tell Monaco that this next
-               * change originated remotely.
-               */
-              isRemoteChange.current = true;
-
-              /*
-               * Server accepted a change based
-               * on data.revision.
-               *
-               * Therefore:
-               *
-               * server:
-               *
-               * 545 -> 546
-               *
-               * client:
-               *
-               * 546
-               */
-              const newRevision = data.revision + 1;
-
-              localRevisionRef.current = newRevision;
-
-              setCode(data.content);
-
-              const updatedFile = {
-                ...currentFile,
-
-                content: data.content,
-
-                revision: newRevision,
-              };
-
-              selectedFileRef.current = updatedFile;
-
-              setSelectedFile(updatedFile);
-
-              setFiles((previousFiles) =>
-                previousFiles.map((file) =>
-                  file.id === data.fileId ? updatedFile : file
-                )
-              );
-
-              setSaveStatus("Saved");
-
-              isDirtyRef.current = false;
-            }
-
-            return;
-          }
-
-          // =================================================
-          // CHANGE ACCEPTED
-          // =================================================
-
-          if (data.type === "change-accepted") {
-            const currentFile = selectedFileRef.current;
-
-            if (currentFile && data.fileId === currentFile.id) {
-              const updatedFile = {
-                ...currentFile,
-
-                revision: data.revision,
-              };
-
-              selectedFileRef.current = updatedFile;
-
-              localRevisionRef.current = data.revision;
-
-              setSelectedFile(updatedFile);
-
-              setFiles((previousFiles) =>
-                previousFiles.map((file) =>
-                  file.id === data.fileId
-                    ? {
-                        ...file,
-
-                        revision: data.revision,
-                      }
-                    : file
-                )
-              );
-            }
-
-            return;
-          }
-
-          // =================================================
-          // STALE CHANGE
-          // =================================================
-
-          if (data.type === "stale-change") {
-            console.warn("⚠️ Stale change detected", data);
-
-            /*
-             * Local editor may contain unsaved
-             * changes.
-             *
-             * Never overwrite it automatically.
-             */
-            setError("Your editor is out of sync.");
-
-            const currentFile = selectedFileRef.current;
-
-            const currentSocket = socketRef.current;
-
-            if (
-              currentFile &&
-              currentSocket &&
-              currentSocket.readyState === WebSocket.OPEN
-            ) {
-              /*
-               * Ask server which revision is current.
-               */
-              currentSocket.send(
-                JSON.stringify({
-                  type: "check-file",
-
-                  fileId: currentFile.id,
-
-                  revision: localRevisionRef.current,
-                })
-              );
-            }
-
-            setMessage("Your local changes were preserved. Review before saving.");
-
-            return;
-          }
-
-          // =================================================
-          // FILE STATE
-          // =================================================
-
-          if (data.type === "file-state") {
-            console.log("📦 FILE STATE RECEIVED");
-
-            console.log("Server revision:", data.revision);
-
-            console.log("File ID:", data.fileId);
-
-            const currentFile = selectedFileRef.current;
-
-            if (currentFile && data.fileId === currentFile.id) {
-              /*
-               * Remote/server synchronization.
-               */
-              isRemoteChange.current = true;
-
-              setCode(data.content || "");
-
-              const updatedFile = {
-                ...currentFile,
-
-                content: data.content || "",
-
-                revision: data.revision,
-              };
-
-              selectedFileRef.current = updatedFile;
-
-              localRevisionRef.current = data.revision;
-
-              setSelectedFile(updatedFile);
-
-              setFiles((previousFiles) =>
-                previousFiles.map((file) =>
-                  file.id === data.fileId
-                    ? {
-                        ...file,
-
-                        content: data.content || "",
-
-                        revision: data.revision,
-                      }
-                    : file
-                )
-              );
-
-              setSaveStatus("Saved");
-
-              isDirtyRef.current = false;
-
-              setError("");
-
-              setMessage("File synchronized");
-            }
 
             return;
           }
@@ -1666,8 +1409,6 @@ function Room() {
 
       selectedFileRef.current = data.file;
 
-      localRevisionRef.current = data.file.revision;
-
       setCode(data.file.content || "");
 
       setSaveStatus("Saved");
@@ -1726,8 +1467,6 @@ function Room() {
 
       selectedFileRef.current = loadedFile;
 
-      localRevisionRef.current = loadedFile.revision;
-
       setCode(loadedFile.content || "");
 
       setSaveStatus("Saved");
@@ -1735,9 +1474,19 @@ function Room() {
       isDirtyRef.current = false;
 
       /*
-       * Initialize Yjs for this file.
+       * NOTE: setupYjsDocument() is intentionally NOT called here.
+       *
+       * The Yjs document and the MonacoBinding are created together
+       * in the Editor's onMount. Calling setupYjsDocument() here
+       * destroyed the existing binding and doc, and because the
+       * Editor's key (selectedFile.id) does not change when the same
+       * file is clicked again, onMount never ran to rebuild them.
+       * The editor was left disconnected from Yjs, so typing was never
+       * sent and remote updates never appeared on screen.
+       *
+       * When a DIFFERENT file is selected, the key changes, the Editor
+       * remounts and onMount sets up a fresh doc + binding.
        */
-      setupYjsDocument(loadedFile.id);
     } catch (error) {
       console.error(error);
 
@@ -1814,9 +1563,6 @@ function Room() {
       // Update selected file ref
       selectedFileRef.current = loadedFile;
 
-      // REST save is now persisted
-      localRevisionRef.current = loadedFile.revision;
-
       // Update selected file
       setSelectedFile(loadedFile);
 
@@ -1826,21 +1572,10 @@ function Room() {
 
       isDirtyRef.current = false;
 
-      // =====================================================
-      // SYNCHRONIZE OTHER CLIENTS
-      // =====================================================
-
-      const socket = socketRef.current;
-
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(
-          JSON.stringify({
-            type: "sync-file",
-
-            fileId: loadedFile.id,
-          })
-        );
-      }
+      /*
+       * Other clients no longer need a "sync-file" message:
+       * Yjs already delivers every edit to them.
+       */
     } catch (error) {
       console.error(error);
 
@@ -1882,9 +1617,20 @@ function Room() {
   };
 
   // =========================================================
-  // DEBOUNCED AUTOSAVE
+  // DEBOUNCED AUTOSAVE (DISABLED FOR PHASE 5C)
+  //
+  // Yjs now owns the document content and the server
+  // persists it (2 second debounce, content + yjs_state).
+  //
+  // This REST autosave would send the React `code` state,
+  // which can lag behind the CRDT, and overwrite newer
+  // content in PostgreSQL.
+  //
+  // Manual saves (Save button / Ctrl+S) still use
+  // PUT /api/rooms/:roomId/files/:fileId.
   // =========================================================
 
+  /*
   useEffect(() => {
     if (!selectedFile) {
       return;
@@ -1902,6 +1648,7 @@ function Room() {
       clearTimeout(timer);
     };
   }, [code, selectedFile, saveStatus]);
+  */
 
   // =========================================================
   // CTRL + S / CMD + S
@@ -2342,23 +2089,15 @@ function Room() {
                     }
                   }}
                   onChange={(value) => {
-                    const newCode = value || "";
-
-                    setCode(newCode);
-
-                    setSaveStatus("Unsaved");
-
                     /*
                      * Yjs / MonacoBinding is now responsible
                      * for synchronization.
                      *
                      * Do NOT send code-change here.
                      */
+                    setCode(value || "");
 
-                    if (isRemoteChange.current) {
-                      isRemoteChange.current = false;
-                      return;
-                    }
+                    setSaveStatus("Unsaved");
 
                     isDirtyRef.current = true;
                   }}
